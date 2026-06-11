@@ -1,0 +1,311 @@
+#!/bin/bash
+
+SCRIPT_VERSION="v1.0"
+# ==============================================================================
+# Tony Teaches Tech's VPS Setup Script
+# ==============================================================================
+# This script is designed to take a freshly provisioned Ubuntu or Debian VPS
+# and immediately secure it while preparing it for Docker-based deployments.
+#
+# EXACTLY WHAT THIS SCRIPT DOES:
+# 0. Initial Checks: Ensures the script is run as root and verifies that
+#    the OS supports apt-get and systemd before proceeding.
+# 1. User Setup: Prompts to create a new non-root user, asks you to set a
+#    password, and grants them passwordless sudo access (NOPASSWD:ALL).
+# 2. SSH Hardening: Safely disables direct root login to prevent brute-force
+#    attacks while ensuring password and SSH key access remain enabled for
+#    the new user. Tests the config before applying to prevent lockouts.
+# 3. System Updates: Updates package lists and upgrades all system packages.
+# 4. Core Utilities & Security: Installs essential tools (ufw, curl, wget, git,
+#    ca-certificates, gnupg) and starts Fail2Ban to block malicious IPs.
+# 5. Auto-Patching: Installs and configures 'unattended-upgrades' to
+#    automatically apply security updates and clean up old packages weekly.
+# 6. Firewall Lockdown: Enables UFW, denying all incoming traffic by default,
+#    allowing outgoing traffic, and explicitly allowing SSH.
+# 7. Docker Engine: Fetches the official Docker installation script, installs
+#    Docker, enables the systemd service, and adds the new user to the 'docker'
+#    group so containers can be run without 'sudo'.
+# 8. Final Output: Dynamically fetches the server's public IP, prints
+#    login instructions for the new user, and detects if a system reboot is
+#    required.
+#
+# SAFETY & LOGGING:
+# This script is idempotent (safe to run multiple times). It backs up your SSH
+# config before modifying it. All verbose installation output is cleanly
+# redirected to /var/log/vps-setup.log to keep the terminal clean.
+# ==============================================================================
+
+set -uo pipefail
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+LOG_FILE="/var/log/vps-setup.log"
+echo "Starting TTT VPS Setup ($SCRIPT_VERSION)..." > "$LOG_FILE"
+
+die() {
+    echo -e "\n${RED}❌ ERROR: $1${NC}"
+    echo -e "${RED}Script aborted. Check log for possible details: cat $LOG_FILE${NC}"
+    exit 1
+}
+
+step() {
+    echo -e "\n${BLUE}====================================================${NC}"
+    echo -e "${BLUE}[$1] $2${NC}"
+    echo -e "${BLUE}====================================================${NC}"
+}
+
+ok() {
+    echo -e "   ${GREEN}✔ Done${NC}"
+}
+
+info() {
+    echo -e "   ${YELLOW}$1${NC}"
+}
+
+# ============================================================
+# 0. INITIAL CHECKS
+# ============================================================
+
+[ "$EUID" -ne 0 ] && die "Run with: sudo bash setup.sh"
+
+command -v apt-get >/dev/null 2>&1 || die "Unsupported OS (Debian/Ubuntu required)"
+command -v systemctl >/dev/null 2>&1 || die "Systemd required"
+
+# ============================================================
+# HEADER
+# ============================================================
+
+echo -e "${BLUE}====================================================${NC}"
+echo -e "${GREEN}   VPS Setup Script ${SCRIPT_VERSION} by Tony Teaches Tech${NC}"
+echo -e "${BLUE}====================================================${NC}"
+echo
+
+echo "On a fresh VPS instance, this script:"
+echo "- Creates a new user"
+echo "- Makes SSH access more secure"
+echo "- Updates the system"
+echo "- Installs recommended packages"
+echo "- Enables automatic security updates"
+echo "- Locks down the firewall to only allow SSH"
+echo "- Installs Docker"
+
+# ============================================================
+# 1. USER SETUP
+# ============================================================
+
+step "1/7" "Create a new user"
+
+while true; do
+    read -p "Enter username (default: noname): " NEW_USER
+
+    if [ -z "${NEW_USER:-}" ]; then
+        NEW_USER="noname"
+        info "Using default user: noname"
+    fi
+
+    NEW_USER=$(echo "$NEW_USER" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$NEW_USER" =~ ^(root|admin|ubuntu|daemon)$ ]]; then
+        info "Error: '$NEW_USER' is a reserved name. Try again."
+        continue
+    fi
+
+    if [[ ! "$NEW_USER" =~ ^[a-z][a-z0-9_-]{0,31}$ ]]; then
+        info "Error: Invalid format. Must start with a letter and contain no spaces."
+        continue
+    fi
+
+    break
+done
+
+if id "$NEW_USER" &>/dev/null; then
+    info "User '$NEW_USER' already exists, ensuring permissions are set..."
+    # Keep sudo rules up to date just in case
+    echo "$NEW_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$NEW_USER" || die "Sudoers setup failed"
+    chmod 0440 /etc/sudoers.d/"$NEW_USER"
+else
+    useradd -m -s /bin/bash "$NEW_USER" >> "$LOG_FILE" 2>&1 || die "User creation failed"
+
+    echo "$NEW_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$NEW_USER" \
+        || die "Sudoers setup failed"
+
+    chmod 0440 /etc/sudoers.d/"$NEW_USER"
+    info "Configured user permissions"
+fi
+
+# MOVED OUTSIDE: Always prompt for a password, even if the user exists!
+echo "Set password for SSH login:"
+passwd "$NEW_USER" || die "Password setup failed"
+
+ok
+
+# ============================================================
+# 2. SSH SAFETY
+# ============================================================
+
+step "2/7" "Secure SSH"
+
+SSH_CONF="/etc/ssh/sshd_config.d/60-ttt.conf"
+
+if [ -f "$SSH_CONF" ]; then
+    cp "$SSH_CONF" "${SSH_CONF}.bak" >> "$LOG_FILE" 2>&1 || die "Backup failed"
+    info "Backed up old SSH config"
+fi
+
+cat <<EOF > "$SSH_CONF" || die "SSH config write failed"
+PermitRootLogin prohibit-password
+PasswordAuthentication yes
+PubkeyAuthentication yes
+EOF
+info "Secured SSH config"
+
+sshd -t >> "$LOG_FILE" 2>&1 || {
+    mv "${SSH_CONF}.bak" "$SSH_CONF" >> "$LOG_FILE" 2>&1
+    die "Invalid SSH config — rollback executed"
+}
+info "Validated new SSH config"
+
+systemctl restart ssh >> "$LOG_FILE" 2>&1 || systemctl restart sshd >> "$LOG_FILE" 2>&1 || die "Failed to restart SSH service"
+info "Restarted SSH service"
+
+ok
+
+# ============================================================
+# 3. SYSTEM UPDATE
+# ============================================================
+
+step "3/7" "Updating system"
+
+apt-get update -qq >> "$LOG_FILE" 2>&1 || die "apt update failed"
+info "Updated package lists"
+
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq >> "$LOG_FILE" 2>&1 || die "upgrade failed"
+info "Upgraded system packages"
+
+ok
+
+# ============================================================
+# 4. RECOMMENDED PACKAGES
+# ============================================================
+
+step "4/7" "Installing recommended packages"
+
+PACKAGES="ufw curl wget git ca-certificates gnupg fail2ban"
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES \
+>> "$LOG_FILE" 2>&1 || die "package install failed"
+
+systemctl enable fail2ban >> "$LOG_FILE" 2>&1
+systemctl start fail2ban >> "$LOG_FILE" 2>&1
+
+info "Installed the following packages:"
+for pkg in $PACKAGES; do
+    echo -e "   ${YELLOW}- $pkg${NC}"
+done
+
+ok
+
+# ============================================================
+# 5. SECURITY UPDATES
+# ============================================================
+
+step "5/7" "Enabling automatic security updates"
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades \
+>> "$LOG_FILE" 2>&1 || die "failed to install unattended-upgrades"
+
+echo unattended-upgrades unattended-upgrades/enable_auto_updates boolean true | debconf-set-selections \
+    >> "$LOG_FILE" 2>&1 || die "failed to configure unattended-upgrades"
+
+dpkg-reconfigure -f noninteractive unattended-upgrades >> "$LOG_FILE" 2>&1 \
+    || die "failed to enable unattended-upgrades"
+
+cat <<EOF > /etc/apt/apt.conf.d/20auto-upgrades
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+
+systemctl enable --now apt-daily.timer >> "$LOG_FILE" 2>&1
+systemctl enable --now apt-daily-upgrade.timer >> "$LOG_FILE" 2>&1
+
+info "Enabled automatic security updates"
+
+ok
+
+# ============================================================
+# 6. FIREWALL
+# ============================================================
+
+step "6/7" "Configuring ufw firewall"
+
+ufw default deny incoming >> "$LOG_FILE" 2>&1 || die "ufw deny incoming failed"
+info "Set default policy: Deny incoming"
+
+ufw default allow outgoing >> "$LOG_FILE" 2>&1 || die "ufw allow outgoing failed"
+info "Set default policy: Allow outgoing"
+
+ufw allow OpenSSH >> "$LOG_FILE" 2>&1 || die "ufw ssh rule failed"
+info "Allowed only SSH traffic"
+
+ufw --force enable >> "$LOG_FILE" 2>&1 || die "ufw enable failed"
+info "Enabled UFW firewall"
+
+ok
+
+# ============================================================
+# 7. DOCKER
+# ============================================================
+
+step "7/7" "Installing Docker"
+
+if ! command -v docker >/dev/null 2>&1; then
+    curl -fsSL https://get.docker.com -o /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker download failed"
+    info "Downloaded Docker install script"
+    
+    sh /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker install failed"
+    info "Installed Docker Engine"
+    
+    systemctl enable --now docker >> "$LOG_FILE" 2>&1 || die "docker service start failed"
+    info "Started Docker daemon"
+else
+    info "Docker already installed"
+fi
+
+usermod -aG docker "$NEW_USER" >> "$LOG_FILE" 2>&1 || die "docker group add failed"
+info "Added user '$NEW_USER' to docker group"
+
+ok
+
+# ============================================================
+# FINAL OUTPUT
+# ============================================================
+
+echo -e "\n${BLUE}====================================================${NC}"
+echo -e "${GREEN}            🎉 SETUP COMPLETE                       ${NC}"
+echo -e "${BLUE}====================================================${NC}"
+
+IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+[ -z "$IP" ] && IP=$(hostname -I | awk '{print $1}')
+[ -z "$IP" ] && IP="YOUR_SERVER_IP"
+
+echo
+echo "🚨 IMPORTANT NEXT STEPS:"
+echo
+echo "1. exit"
+echo "2. ssh $NEW_USER@$IP"
+echo
+echo "⚠ Docker WILL NOT WORK until you re-login"
+echo
+
+if [ -f /var/run/reboot-required ]; then
+    echo -e "${YELLOW}Reboot required. Rebooting in 5 seconds...${NC}"
+    sleep 5
+    reboot
+else
+    echo -e "${GREEN}No reboot required.${NC}"
+fi
