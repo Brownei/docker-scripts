@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_VERSION="v1.0"
+SCRIPT_VERSION="v1.1"
 # ==============================================================================
 # Tony Teaches Tech's VPS Setup Script
 # ==============================================================================
@@ -66,6 +66,16 @@ info() {
     echo -e "   ${YELLOW}$1${NC}"
 }
 
+# Wait for background apt processes to release the dpkg lock
+wait_for_apt() {
+    if command -v fuser >/dev/null 2>&1; then
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+            info "Waiting for background apt processes to finish..."
+            sleep 5
+        done
+    fi
+}
+
 # ============================================================
 # 0. INITIAL CHECKS
 # ============================================================
@@ -83,7 +93,6 @@ echo -e "${BLUE}====================================================${NC}"
 echo -e "${GREEN}   VPS Setup Script ${SCRIPT_VERSION} by Tony Teaches Tech${NC}"
 echo -e "${BLUE}====================================================${NC}"
 echo
-
 echo "On a fresh VPS instance, this script:"
 echo "- Creates a new user"
 echo "- Makes SSH access more secure"
@@ -124,7 +133,6 @@ done
 
 if id "$NEW_USER" &>/dev/null; then
     info "User '$NEW_USER' already exists, ensuring permissions are set..."
-    # Keep sudo rules up to date just in case
     echo "$NEW_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$NEW_USER" || die "Sudoers setup failed"
     chmod 0440 /etc/sudoers.d/"$NEW_USER"
 else
@@ -137,7 +145,6 @@ else
     info "Configured user permissions"
 fi
 
-# MOVED OUTSIDE: Always prompt for a password, even if the user exists!
 echo "Set password for SSH login:"
 passwd "$NEW_USER" || die "Password setup failed"
 
@@ -180,9 +187,11 @@ ok
 
 step "3/7" "Updating system"
 
+wait_for_apt
 apt-get update -qq >> "$LOG_FILE" 2>&1 || die "apt update failed"
 info "Updated package lists"
 
+wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq >> "$LOG_FILE" 2>&1 || die "upgrade failed"
 info "Upgraded system packages"
 
@@ -196,6 +205,7 @@ step "4/7" "Installing recommended packages"
 
 PACKAGES="ufw curl wget git ca-certificates gnupg fail2ban"
 
+wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES \
 >> "$LOG_FILE" 2>&1 || die "package install failed"
 
@@ -215,6 +225,7 @@ ok
 
 step "5/7" "Enabling automatic security updates"
 
+wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades \
 >> "$LOG_FILE" 2>&1 || die "failed to install unattended-upgrades"
 
@@ -267,6 +278,7 @@ if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com -o /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker download failed"
     info "Downloaded Docker install script"
     
+    wait_for_apt
     sh /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker install failed"
     info "Installed Docker Engine"
     
@@ -287,25 +299,21 @@ ok
 
 echo -e "\n${BLUE}====================================================${NC}"
 echo -e "${GREEN}            🎉 SETUP COMPLETE                       ${NC}"
-echo -e "${BLUE}====================================================${NC}"
+echo -e "${BLUE}====================================================${NC}\n"
 
 IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
 [ -z "$IP" ] && IP=$(hostname -I | awk '{print $1}')
 [ -z "$IP" ] && IP="YOUR_SERVER_IP"
 
-echo
 echo "🚨 IMPORTANT NEXT STEPS:"
-echo
-echo "1. exit"
-echo "2. ssh $NEW_USER@$IP"
-echo
-echo "⚠ Docker WILL NOT WORK until you re-login"
-echo
+echo -e "⚠ Docker WILL NOT WORK until you log in as the new user.\n"
 
 if [ -f /var/run/reboot-required ]; then
-    echo -e "${YELLOW}Reboot required. Rebooting in 5 seconds...${NC}"
+    echo -e "${YELLOW}Reboot required. Server restarting in 5 seconds...${NC}"
+    echo -e "Once it boots up, reconnect using: ${GREEN}ssh $NEW_USER@$IP${NC}\n"
     sleep 5
     reboot
 else
-    echo -e "${GREEN}No reboot required.${NC}"
+    echo "1. Type 'exit' to log out of this root session."
+    echo -e "2. Reconnect using: ${GREEN}ssh $NEW_USER@$IP${NC}\n"
 fi
