@@ -14,10 +14,22 @@ Downloads, secures, and prepares a VPS for Docker deployments.
 - Configures UFW
 - Installs Fail2Ban
 
-### Latest Version
 
+### Debain setup config
 ```bash
-wget https://raw.githubusercontent.com/tonyflo/ttt-vps-scripts/main/setup.sh
-chmod +x setup.sh
-sudo ./setup.sh
+wget https://raw.githubusercontent.com/Brownei/docker-scripts/main/setup-docker-debian.sh
 ```
+
+### Ubuntu setup config
+```bash
+wget https://raw.githubusercontent.com/Brownei/docker-scripts/main/setup-docker-ubuntu.sh
+```
+
+### After script download
+```bash
+chmod +x setup-docker-[os].sh
+sudo ./setup-docker-[os].sh
+```
+
+#### > [!NOTE]
+> Please run the sudo with the script when using ubuntu
