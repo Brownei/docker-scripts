@@ -21,9 +21,9 @@ SCRIPT_VERSION="v1.1-debian"
 #    automatically apply security updates and clean up old packages weekly.
 # 6. Firewall Lockdown: Enables UFW, denying all incoming traffic by default,
 #    allowing outgoing traffic, and explicitly allowing SSH.
-# 7. Docker Engine: Fetches the official Docker installation script, installs
-#    Docker, enables the systemd service, and adds the new user to the 'docker'
-#    group so containers can be run without 'sudo'.
+# 7. Docker Engine: Installs Docker from the official Debian repo, enables the
+#    systemd service, and adds the new user to the 'docker' group so containers
+#    can be run without 'sudo'.
 # 8. Final Output: Dynamically fetches the server's public IP, prints
 #    login instructions for the new user, and detects if a system reboot is
 #    required.
@@ -41,6 +41,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 LOG_FILE="/var/log/vps-setup.log"
 echo "Starting TTT VPS Setup ($SCRIPT_VERSION)..." > "$LOG_FILE"
+
 die() {
     echo -e "\n${RED}❌ ERROR: $1${NC}"
     echo -e "${RED}Script aborted. Check log for possible details: cat $LOG_FILE${NC}"
@@ -57,6 +58,7 @@ ok() {
 info() {
     echo -e "   ${YELLOW}$1${NC}"
 }
+
 # Wait for background apt processes to release the dpkg lock
 wait_for_apt() {
     if command -v fuser >/dev/null 2>&1; then
@@ -66,28 +68,34 @@ wait_for_apt() {
         done
     fi
 }
+
+# Install Docker from the official Debian apt repository
 install_docker() {
-  # Add Docker's official GPG key:
-  apt update
-  apt install ca-certificates curl
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
+    # Add Docker's official GPG key
+    apt-get update -qq >> "$LOG_FILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl >> "$LOG_FILE" 2>&1
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc >> "$LOG_FILE" 2>&1
+    chmod a+r /etc/apt/keyrings/docker.asc
 
-  # Add the repository to Apt sources:
-  tee /etc/apt/sources.list.d/docker.sources <<EOF
-  Types: deb
-  URIs: https://download.docker.com/linux/debian
-  Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
-  Components: stable
-  Architectures: $(dpkg --print-architecture)
-  Signed-By: /etc/apt/keyrings/docker.asc
-  EOF
+    # Add the Docker repository — no leading whitespace (heredoc must be unindented)
+    CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    ARCH=$(dpkg --print-architecture)
+cat > /etc/apt/sources.list.d/docker.sources << EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: ${CODENAME}
+Components: stable
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
 
-  apt update
-
-  apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    apt-get update -qq >> "$LOG_FILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin >> "$LOG_FILE" 2>&1
 }
+
 # ============================================================
 # 0. INITIAL CHECKS
 # ============================================================
@@ -99,12 +107,11 @@ command -v systemctl >/dev/null 2>&1 || die "Systemd required"
 # Also check Debian version for sshd_config.d support (Debian 11+)
 OS_ID=$(grep -oP '(?<=^ID=).+' /etc/os-release | tr -d '"')
 OS_VERSION_ID=$(grep -oP '(?<=^VERSION_ID=).+' /etc/os-release | tr -d '"' | cut -d. -f1)
-info "Detected OS: ${OS_ID} ${OS_VERSION_ID}"
 
 # Debian 10 (Buster) doesn't support sshd_config.d includes by default
 # Debian 11+ (Bullseye/Bookworm) does
 USE_SSHD_D=true
-if [ "$OS_ID" = "debian" ] && [ "$OS_VERSION_ID" -lt 11 ] 2>/dev/null; then
+if [ "$OS_ID" = "debian" ] && [ "${OS_VERSION_ID:-0}" -lt 11 ] 2>/dev/null; then
     USE_SSHD_D=false
 fi
 
@@ -122,6 +129,8 @@ echo -e "${BLUE}====================================================${NC}"
 echo -e "${GREEN}   VPS Setup Script ${SCRIPT_VERSION} by Tony Teaches Tech${NC}"
 echo -e "${BLUE}====================================================${NC}"
 echo
+echo "Detected OS: ${OS_ID} ${OS_VERSION_ID}"
+echo
 echo "On a fresh VPS instance, this script:"
 echo "- Creates a new user"
 echo "- Makes SSH access more secure"
@@ -130,6 +139,7 @@ echo "- Installs recommended packages"
 echo "- Enables automatic security updates"
 echo "- Locks down the firewall to only allow SSH"
 echo "- Installs Docker"
+
 # ============================================================
 # 1. USER SETUP
 # ============================================================
@@ -151,6 +161,7 @@ while true; do
     fi
     break
 done
+
 if id "$NEW_USER" &>/dev/null; then
     info "User '$NEW_USER' already exists, skipping creation..."
 else
@@ -160,13 +171,14 @@ fi
 echo "Set password for SSH login:"
 passwd "$NEW_USER" || die "Password setup failed"
 ok
+
 # ============================================================
 # 2. SSH SAFETY
 # ============================================================
 step "2/7" "Secure SSH"
 
 if [ "$USE_SSHD_D" = true ]; then
-    # Debian 11+ / Ubuntu: use drop-in config dir
+    # Debian 11+ : use drop-in config dir
     SSH_CONF="/etc/ssh/sshd_config.d/60-ttt.conf"
 
     # Ensure the include directive exists in the main sshd_config
@@ -202,19 +214,17 @@ fi
 
 info "Secured SSH config"
 sshd -t >> "$LOG_FILE" 2>&1 || {
-    if [ "$USE_SSHD_D" = true ] && [ -f "${SSH_CONF}.bak" ]; then
-        mv "${SSH_CONF}.bak" "$SSH_CONF" >> "$LOG_FILE" 2>&1
-    elif [ -f "${SSH_CONF}.bak" ]; then
+    if [ -f "${SSH_CONF}.bak" ]; then
         mv "${SSH_CONF}.bak" "$SSH_CONF" >> "$LOG_FILE" 2>&1
     fi
     die "Invalid SSH config — rollback executed"
 }
 info "Validated new SSH config"
 
-# Use the correct service name for Debian vs Ubuntu
 systemctl restart "$SSH_SERVICE" >> "$LOG_FILE" 2>&1 || die "Failed to restart SSH service ($SSH_SERVICE)"
 info "Restarted SSH service ($SSH_SERVICE)"
 ok
+
 # ============================================================
 # 3. SYSTEM UPDATE
 # ============================================================
@@ -226,6 +236,7 @@ wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq >> "$LOG_FILE" 2>&1 || die "upgrade failed"
 info "Upgraded system packages"
 ok
+
 # ============================================================
 # 4. RECOMMENDED PACKAGES
 # ============================================================
@@ -233,7 +244,7 @@ step "4/7" "Installing recommended packages"
 PACKAGES="ufw curl wget git ca-certificates gnupg fail2ban"
 wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES \
->> "$LOG_FILE" 2>&1 || die "package install failed"
+    >> "$LOG_FILE" 2>&1 || die "package install failed"
 systemctl enable fail2ban >> "$LOG_FILE" 2>&1
 systemctl start fail2ban >> "$LOG_FILE" 2>&1
 info "Installed the following packages:"
@@ -241,13 +252,14 @@ for pkg in $PACKAGES; do
     echo -e "   ${YELLOW}- $pkg${NC}"
 done
 ok
+
 # ============================================================
 # 5. SECURITY UPDATES
 # ============================================================
 step "5/7" "Enabling automatic security updates"
 wait_for_apt
 DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades \
->> "$LOG_FILE" 2>&1 || die "failed to install unattended-upgrades"
+    >> "$LOG_FILE" 2>&1 || die "failed to install unattended-upgrades"
 
 # Debian uses 'stable' origin, not 'Ubuntu' — configure appropriately
 cat <<EOF > /etc/apt/apt.conf.d/50unattended-upgrades
@@ -271,10 +283,12 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
 EOF
+
 systemctl enable --now apt-daily.timer >> "$LOG_FILE" 2>&1
 systemctl enable --now apt-daily-upgrade.timer >> "$LOG_FILE" 2>&1
 info "Enabled automatic security updates"
 ok
+
 # ============================================================
 # 6. FIREWALL
 # ============================================================
@@ -288,26 +302,34 @@ info "Allowed only SSH traffic"
 ufw --force enable >> "$LOG_FILE" 2>&1 || die "ufw enable failed"
 info "Enabled UFW firewall"
 ok
+
 # ============================================================
 # 7. DOCKER
 # ============================================================
 step "7/7" "Installing Docker"
 if ! command -v docker >/dev/null 2>&1; then
-    apt remove $(dpkg --get-selections docker.io docker-compose docker-doc podman-docker containerd runc | cut -f1) -o /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker download failed"
-    info "Removed all conflicting packages"
+    # Remove any conflicting packages before installing
+    CONFLICT_PKGS="docker.io docker-compose docker-doc podman-docker containerd runc"
+    for pkg in $CONFLICT_PKGS; do
+        if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+            DEBIAN_FRONTEND=noninteractive apt-get remove -y "$pkg" >> "$LOG_FILE" 2>&1
+        fi
+    done
+    info "Removed conflicting packages (if any)"
 
     wait_for_apt
-    install_docker >> "$LOG_FILE" 2>&1 || die "docker install failed"
+    install_docker || die "Docker install failed"
     info "Installed Docker Engine"
 
-    # systemctl enable --now docker >> "$LOG_FILE" 2>&1 || die "docker service start failed"
-    # info "Started Docker daemon"
+    systemctl enable --now docker >> "$LOG_FILE" 2>&1 || die "docker service start failed"
+    info "Started Docker daemon"
 else
     info "Docker already installed"
 fi
 usermod -aG docker "$NEW_USER" >> "$LOG_FILE" 2>&1 || die "docker group add failed"
 info "Added user '$NEW_USER' to docker group"
 ok
+
 # ============================================================
 # FINAL OUTPUT
 # ============================================================
