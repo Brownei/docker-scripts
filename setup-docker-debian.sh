@@ -130,23 +130,10 @@ while true; do
     break
 done
 if id "$NEW_USER" &>/dev/null; then
-    info "User '$NEW_USER' already exists, ensuring permissions are set..."
-    # Ensure sudo is installed (Debian minimal doesn't include it by default)
-    if ! command -v sudo >/dev/null 2>&1; then
-        apt-get install -y sudo >> "$LOG_FILE" 2>&1 || die "sudo install failed"
-    fi
-    echo "$NEW_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$NEW_USER" || die "Sudoers setup failed"
-    chmod 0440 /etc/sudoers.d/"$NEW_USER"
+    info "User '$NEW_USER' already exists, skipping creation..."
 else
-    # Ensure sudo is installed (Debian minimal doesn't include it by default)
-    if ! command -v sudo >/dev/null 2>&1; then
-        apt-get install -y sudo >> "$LOG_FILE" 2>&1 || die "sudo install failed"
-    fi
     useradd -m -s /bin/bash "$NEW_USER" >> "$LOG_FILE" 2>&1 || die "User creation failed"
-    echo "$NEW_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$NEW_USER" \
-        || die "Sudoers setup failed"
-    chmod 0440 /etc/sudoers.d/"$NEW_USER"
-    info "Configured user permissions"
+    info "Created user '$NEW_USER'"
 fi
 echo "Set password for SSH login:"
 passwd "$NEW_USER" || die "Password setup failed"
