@@ -1,6 +1,6 @@
-# Tony Teaches Tech VPS Scripts
+# Tony Teaches Tech VPS Scripts (Brownei's Version)
 
-Scripts used in my YouTube tutorials.
+These scripts are used at Tony Teaches Tech[https://www.youtube.com/channel/UCWPJwoVXJhv0-ucr3pUs1dA] youtube. I just took the boilerplate and made it work for my debian LXC machines
 
 ## Docker VPS Bootstrap Script
 
