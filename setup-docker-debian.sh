@@ -66,6 +66,28 @@ wait_for_apt() {
         done
     fi
 }
+install_docker() {
+  # Add Docker's official GPG key:
+  apt update
+  apt install ca-certificates curl
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+
+  # Add the repository to Apt sources:
+  tee /etc/apt/sources.list.d/docker.sources <<EOF
+  Types: deb
+  URIs: https://download.docker.com/linux/debian
+  Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+  Components: stable
+  Architectures: $(dpkg --print-architecture)
+  Signed-By: /etc/apt/keyrings/docker.asc
+  EOF
+
+  apt update
+
+  apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
 # ============================================================
 # 0. INITIAL CHECKS
 # ============================================================
@@ -271,15 +293,15 @@ ok
 # ============================================================
 step "7/7" "Installing Docker"
 if ! command -v docker >/dev/null 2>&1; then
-    curl -fsSL https://get.docker.com -o /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker download failed"
-    info "Downloaded Docker install script"
+    apt remove $(dpkg --get-selections docker.io docker-compose docker-doc podman-docker containerd runc | cut -f1) -o /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker download failed"
+    info "Removed all conflicting packages"
 
     wait_for_apt
-    sh /tmp/docker.sh >> "$LOG_FILE" 2>&1 || die "docker install failed"
+    install_docker >> "$LOG_FILE" 2>&1 || die "docker install failed"
     info "Installed Docker Engine"
 
-    systemctl enable --now docker >> "$LOG_FILE" 2>&1 || die "docker service start failed"
-    info "Started Docker daemon"
+    # systemctl enable --now docker >> "$LOG_FILE" 2>&1 || die "docker service start failed"
+    # info "Started Docker daemon"
 else
     info "Docker already installed"
 fi
