@@ -289,6 +289,7 @@ systemctl enable --now apt-daily-upgrade.timer >> "$LOG_FILE" 2>&1
 info "Enabled automatic security updates"
 ok
 
+
 # ============================================================
 # 6. FIREWALL
 # ============================================================
